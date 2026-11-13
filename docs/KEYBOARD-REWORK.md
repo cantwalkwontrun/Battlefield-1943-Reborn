@@ -34,6 +34,6 @@ For runtime verification, use a hidden window, a synthetic profile and a loopbac
 
 ## Limits
 
-This work preserves the original aircraft physics. It does not repair the upstream mouse-only flight model. HUD atlas changes apply when the relevant textures reload; an immediate refresh after live rebinding or input-device switching is not guaranteed. Synthetic background tests do not replace testing physical keyboard events, live focus changes or prolonged multiplayer sessions.
+This work preserves the original aircraft physics. Relative mouse steering and its verification are described in [MOUSE-FLIGHT.md](MOUSE-FLIGHT.md). HUD atlas changes apply when the relevant textures reload; an immediate refresh after live rebinding or input-device switching is not guaranteed. Synthetic background tests do not replace testing physical keyboard events, live focus changes or prolonged multiplayer sessions.
 
 For local sky conversion, see [SKY-CONVERSION.md](../tools/hdpack/SKY-CONVERSION.md). No game files or converted texture pack are included.

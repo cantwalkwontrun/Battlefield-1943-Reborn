@@ -11,7 +11,7 @@
 // With bf_look on, the turn is worked out every frame instead:
 //   - the mouse: the window's raw motion while the pointer is locked, a fixed angle per count (0.066 degrees at
 //     sensitivity 1, King Kong's), at any speed and frame rate; the runtime's own mouse to right stick part is kept
-//     at its lowest (mnk_sensitivity 0.01, below the game's dead zone), as in King Kong;
+//     disabled (mnk_mouse_stick false), so raw motion has exactly one input path;
 //   - the stick: the turn speed the game's own update gave on its last tick (its curve, acceleration and zoom
 //     included), times the camera sensitivity, for the time since that tick.
 // Each frame (at VdSwap) that turn is added up; the getters give the local soldier's yaw and pitch plus the turn not
@@ -20,8 +20,8 @@
 // 144 FPS or unlocked. With bf_look off the game turns as on the Xbox 360, and camera sensitivity scales its turn.
 //
 // In a vehicle the soldier's aim does not update. A vehicle's guns and turrets are aimed by the mouse at a target
-// angle (vehicle_mouse.cpp, its input given as the right stick in LookPad); elsewhere (planes) the mouse pushes the
-// right stick, as the runtime did.
+// angle (vehicle_mouse.cpp, its input given as the right stick in LookPad); elsewhere (planes) a frame-timed relative
+// mouse controller supplies pitch/roll and returns to neutral when motion stops.
 
 #include <algorithm>
 #include <atomic>
@@ -31,7 +31,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -44,6 +43,8 @@
 #include <rex/ui/ui_event.h>
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
+
+#include "mouse_flight.h"
 
 REXCVAR_DEFINE_BOOL(bf_look, true, "BF1943/Controls",
                     "Camera turning: true every frame (our look system), false 30 times a second as on the Xbox 360");
@@ -101,10 +102,6 @@ constexpr double kTwoPi = 2.0 * kPi;
 constexpr double kRadiansPerCount = 0.066 * kPi / 180.0;
 // The longest gap between frames or aim updates still turned through (a hitch); longer gaps turn nothing.
 constexpr double kMaxStep = 0.1;
-// In a vehicle the mouse pushes the right stick by its movement over the last game tick (1/30 s), not by what came
-// since the last pad read: the game reads the pad on every frame but its vehicles take the stick once a tick, so at
-// 110 FPS most of the movement went to reads the vehicle never used, and the turn speed changed with the frame rate.
-constexpr double kPadWindow = 1.0 / 30.0;
 // The aim update counts as running for this long after its last call (on foot; not in a vehicle, dead or a menu).
 constexpr double kAimAlive = 0.25;
 
@@ -136,6 +133,8 @@ double AngleDiff(double to, double from) {  // to - from, the short way round
 double CameraGain() { return std::clamp(REXCVAR_GET(bf_camera_sensitivity), 25.0, 300.0) / 100.0; }
 
 #if defined(BF_DEV_TOOLS)
+std::atomic<double> g_test_vehicle_mouse_x{0}, g_test_vehicle_mouse_y{0};
+std::atomic<bool> g_test_vehicle_mouse_enabled{false};
 bool DevLog() {
   static const bool on = std::getenv("BF_DEV_LOOK") != nullptr;
   return on;
@@ -165,7 +164,7 @@ const DevMouse& GetDevMouse() {
 // Mouse look: Keyboard & mouse with the mouse camera, the pointer locked to the game, our menu closed.
 bool MouseLook() {
 #if defined(BF_DEV_TOOLS)
-  if (GetDevMouse().on) return true;
+  if (GetDevMouse().on || g_test_vehicle_mouse_enabled.load(std::memory_order_relaxed)) return true;
 #endif
   return REXCVAR_GET(mnk_mode) && REXCVAR_GET(mnk_mouse) && rex::input::mnk::IsMouseLookActive();
 }
@@ -176,12 +175,8 @@ struct State {
   double raw_dx = 0, raw_dy = 0;  // window counts (times the display density) not yet taken by a frame
   double vehicle_dx = 0, vehicle_dy = 0;  // window counts not yet taken by the vehicle mouse (vehicle_mouse.cpp)
   Clock::time_point vehicle_moved{};      // the mouse's last movement
-  // The mouse's movements over the last kPadWindow, for the right stick push in a vehicle (window counts).
-  struct PadMove {
-    Clock::time_point at;
-    double dx, dy;
-  };
-  std::deque<PadMove> pad_moves;
+  double flight_dx = 0, flight_dy = 0;
+  bf1943::controls::MouseFlight flight_mouse;
   // Aiming down sights or through a scope (the view narrower than the camera's own), and the camera's own field of
   // view (radians).
   bool zooming = false;
@@ -245,7 +240,8 @@ void ClearMouseInput() {
   g.mouse_yaw = g.mouse_pitch = g.off_yaw = g.off_pitch = 0;
   g.rate_yaw = g.rate_pitch = 0;
   g.vehicle_moved = {};
-  g.pad_moves.clear();
+  g.flight_dx = g.flight_dy = 0;
+  g.flight_mouse.Reset();
 }
 
 class Listener : public rex::ui::WindowInputListener, public rex::ui::WindowListener {
@@ -268,8 +264,7 @@ class Listener : public rex::ui::WindowInputListener, public rex::ui::WindowList
     g.raw_dx += e.dx();
     g.raw_dy += e.dy();
     g.vehicle_dx += e.dx(), g.vehicle_dy += e.dy(), g.vehicle_moved = Clock::now();
-    g.pad_moves.push_back({Clock::now(), e.dx(), e.dy()});
-    if (g.pad_moves.size() > 4096) g.pad_moves.pop_front();  // no pad reads (a loading screen): keep it bounded
+    g.flight_dx += e.dx(), g.flight_dy += e.dy();
   }
   // Keyboard & mouse: the wheel toggles the weapon, a notch a press (WheelNotch).
   void OnMouseWheel(rex::ui::MouseEvent& e) override {
@@ -300,9 +295,9 @@ double MouseZoom(const State& s) {
 namespace bf1943 {
 
 void InstallLook(rex::ui::Window* window) {
-  // The mouse turns the soldier itself (above): the runtime's mouse to right stick part stays at its lowest, under
-  // the game's dead zone (Settings > Controls > Mouse sensitivity is bf_mouse_sensitivity).
-  rex::cvar::SetFlagByName("mnk_sensitivity", "0.010000");
+  // Our raw-motion paths own mouse input. Even a small second SDK contribution
+  // can become steering on a sufficiently large/high-DPI mouse movement.
+  rex::cvar::SetFlagByName("mnk_mouse_stick", "false");
   std::lock_guard lock(g.mutex);
   if (!window || g.window) return;
   g.window = window;
@@ -327,7 +322,8 @@ void LookFrame() {
     if (menu) {
       g.raw_dx = g.raw_dy = g.vehicle_dx = g.vehicle_dy = 0;
       g.vehicle_moved = {};
-      g.pad_moves.clear();
+      g.flight_dx = g.flight_dy = 0;
+      g.flight_mouse.Reset();
       ResetVehicleMouse();
       ResetGameplayInput();
     }
@@ -354,11 +350,28 @@ void LookFrame() {
   const bool dev_moving = dev_on <= 0 || std::fmod(dev_t, dev_on + dev_off) < dev_on;
   if (GetDevMouse().on && dev_vehicle && dev_moving && !Alive(g, now) && since < kMaxStep && !menu)
   {
-    g.pad_moves.push_back({now, GetDevMouse().x * since * Density(g), GetDevMouse().y * since * Density(g)});
+    g.flight_dx += GetDevMouse().x * since * Density(g);
+    g.flight_dy += GetDevMouse().y * since * Density(g);
     g.vehicle_dx += GetDevMouse().x * since * Density(g), g.vehicle_dy += GetDevMouse().y * since * Density(g);
     g.vehicle_moved = now;
   }
+  // Scripted rates enter the same accumulators as raw window events. They do
+  // not move the operating-system pointer or require an active test window.
+  if (g_test_vehicle_mouse_enabled.load(std::memory_order_relaxed) && since > 0 && since < kMaxStep && !menu) {
+    const double mx = g_test_vehicle_mouse_x.load(std::memory_order_relaxed) * since * Density(g);
+    const double my = g_test_vehicle_mouse_y.load(std::memory_order_relaxed) * since * Density(g);
+    g.flight_dx += mx, g.flight_dy += my;
+    g.vehicle_dx += mx, g.vehicle_dy += my;
+    if (mx != 0 || my != 0) g.vehicle_moved = now;
+  }
 #endif
+  if (!menu && (!Alive(g, now) || !REXCVAR_GET(bf_look))) {
+    g.flight_mouse.Update(g.flight_dx / Density(g), g.flight_dy / Density(g), since,
+                         REXCVAR_GET(bf_mouse_vehicle_sensitivity));
+  } else {
+    g.flight_mouse.Reset();
+  }
+  g.flight_dx = g.flight_dy = 0;
   const double dx = g.raw_dx, dy = g.raw_dy;
   g.raw_dx = g.raw_dy = 0;
   if (!REXCVAR_GET(bf_look) || !Alive(g, now) || menu) {
@@ -366,7 +379,6 @@ void LookFrame() {
     g.rate_yaw = g.rate_pitch = 0;
     return;
   }
-  g.pad_moves.clear();  // on foot the mouse turns the soldier, not the stick
   // The mouse: a fixed angle per count. Right is a larger yaw (as the stick pushed right, run look1).
   const double k =
       kRadiansPerCount * std::clamp(REXCVAR_GET(bf_mouse_sensitivity), 0.05, 10.0) / Density(g) * MouseZoom(g);
@@ -389,6 +401,14 @@ void LookFrame() {
 // For vehicle_mouse.cpp: the mouse's counts since the last call (not times the display density), and the seconds since
 // it last moved. False without mouse look.
 bool VehicleMouseStick(float real_x, float real_y, float* x, float* y);  // vehicle_mouse.cpp
+#if defined(BF_DEV_TOOLS)
+void SetTestVehicleMouse(double x, double y) {
+  const double old_x = g_test_vehicle_mouse_x.exchange(x, std::memory_order_relaxed);
+  const double old_y = g_test_vehicle_mouse_y.exchange(y, std::memory_order_relaxed);
+  const bool enabled = g_test_vehicle_mouse_enabled.exchange(true, std::memory_order_relaxed);
+  if (!enabled || x != old_x || y != old_y) REXLOG_INFO("BF test vehicle mouse: {:.3f} {:.3f} counts/s", x, y);
+}
+#endif
 bool TakeVehicleMouse(double& dx, double& dy, double& idle) {
   std::lock_guard lock(g.mutex);
   const double density = Density(g);
@@ -405,9 +425,6 @@ bool TakeVehicleMouse(double& dx, double& dy, double& idle) {
 void LookPad(uint8_t* gamepad) {
   std::lock_guard lock(g.mutex);
   const auto now = Clock::now();
-  // The movement over the last game tick; older movements are dropped.
-  while (!g.pad_moves.empty() && std::chrono::duration<double>(now - g.pad_moves.front().at).count() > kPadWindow)
-    g.pad_moves.pop_front();
 #if defined(BF_DEV_TOOLS)
   // BF_DEV_LOOK: how often the game reads the pad, a line every 5 s.
   if (DevLog()) {
@@ -422,7 +439,8 @@ void LookPad(uint8_t* gamepad) {
 #endif
   if (Alive(g, now) && REXCVAR_GET(bf_look)) return;
   if (!MouseLook()) {
-    g.pad_moves.clear();
+    g.flight_mouse.Reset();
+    g.flight_dx = g.flight_dy = 0;
     ResetVehicleMouse();
     return;
   }
@@ -436,38 +454,42 @@ void LookPad(uint8_t* gamepad) {
     // immediately. Mouse movement must not counter-steer a held flight key.
     if (rex::input::mnk::LastKeyRightStick(false) || rex::input::mnk::LastKeyRightStick(true) ||
         std::fabs(manual_x) > 0.3f || std::fabs(manual_y) > 0.3f) {
-      g.pad_moves.clear();
+      g.flight_mouse.Reset();
+      g.flight_dx = g.flight_dy = 0;
       g.vehicle_dx = g.vehicle_dy = 0;
       return;
     }
     if (mouse) {
-      auto put = [](uint8_t* p, double a) {  // past the game's dead zone (0.15), as `add` below
+      auto put = [](uint8_t* p, double a) {  // past the game's dead zone (0.15)
         const double send = a == 0 ? 0.0 : std::copysign(0.15 + std::min(1.0, std::fabs(a)) * 0.85, a);
         const int v = std::clamp(int(std::lround(send * 32767.0)), -32768, 32767);
         p[0] = uint8_t(uint16_t(v) >> 8), p[1] = uint8_t(v);
       };
       put(gamepad + 8, x), put(gamepad + 10, y);
-      g.pad_moves.clear();
+      g.flight_mouse.Reset();
       return;
     }
   }
-  double dx = 0, dy = 0;
-  for (const auto& m : g.pad_moves) dx += m.dx, dy += m.dy;
-  if (dx == 0 && dy == 0) return;
-  // The runtime's mouse to stick scale (200 per count at sensitivity 1, mnk_input_driver.cpp), a tick's movement.
-  const double k = 200.0 / 32767.0 * std::clamp(REXCVAR_GET(bf_mouse_vehicle_sensitivity), 0.05, 10.0) / Density(g);
-  // Past the game's own dead zone (0.15 on each axis, input_settings.cpp): what to send so that the game reads `a`,
-  // or small movements did nothing.
-  auto add = [](uint8_t* p, double a) {
-    if (a == 0) return;
-    a = std::clamp(a, -1.0, 1.0);
-    const double send = std::copysign(0.15 + std::fabs(a) * 0.85, a);
-    const int now = int16_t(uint16_t(p[0]) << 8 | p[1]);
-    const int out = std::clamp(int(std::lround(now + send * 32767.0)), -32768, 32767);
-    p[0] = uint8_t(uint16_t(out) >> 8), p[1] = uint8_t(out);
+  // Changing seat/exiting discards the previous command. The frame sample is
+  // otherwise read-only across repeated pad reads.
+  if ((uint16_t(gamepad[0] << 8 | gamepad[1]) & 0x3000) != 0) g.flight_mouse.Reset();
+  const double x = g.flight_mouse.X(), y = g.flight_mouse.Y(REXCVAR_GET(bf_mouse_invert_y));
+  auto put = [](uint8_t* p, double value) {
+    const uint16_t encoded = uint16_t(controls::MouseFlight::GameAxis(value));
+    p[0] = uint8_t(encoded >> 8), p[1] = uint8_t(encoded);
   };
-  add(gamepad + 8, dx * k);
-  add(gamepad + 10, -dy * k * (REXCVAR_GET(bf_mouse_invert_y) ? -1.0 : 1.0));
+  put(gamepad + 8, x), put(gamepad + 10, y);
+#if defined(BF_DEV_TOOLS)
+  if (std::getenv("BF_DEV_FLIGHT_LOG")) {
+    static auto logged = now;
+    if (now - logged > std::chrono::milliseconds(100)) {
+      logged = now;
+      REXLOG_INFO("BF mouse flight: roll {:.5f} pitch {:.5f}, encoded {} {}, SDK mouse stick {}", x, y,
+                  controls::MouseFlight::GameAxis(x), controls::MouseFlight::GameAxis(y),
+                  rex::cvar::GetFlagByName("mnk_mouse_stick"));
+    }
+  }
+#endif
 }
 
 }  // namespace bf1943

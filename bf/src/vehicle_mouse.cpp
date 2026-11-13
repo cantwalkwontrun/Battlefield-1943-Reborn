@@ -11,8 +11,9 @@
 // scale, times Vehicle sensitivity), and in each call the input the part reads is replaced by the one that drives the
 // body to that target as fast as the vehicle allows, and stops it there (a proportional and damping controller on the
 // body's angle and angular velocity, the game's square undone). The server sees ordinary input values. A controller's
-// stick takes over at once when it is used (the target follows the turret). Planes keep the stick push: their pitch
-// and roll are forces of the flight model with no angle to aim (look.cpp LookPad).
+// stick takes over at once when it is used (the target follows the turret). Aircraft also use this helper for their
+// self-centring control surfaces: non-zero ResetForceModifier excludes those from aiming so pitch/roll keep the
+// ordinary flight stick (look.cpp LookPad).
 //
 // Only the local player's seat runs these steps in the player's game (vaim2: the helpers ran for the seat sat in).
 
@@ -106,6 +107,36 @@ REX_HOOK_RAW(sub_822ADE38) {
     const uint32_t values = Load32(base, input + 0x160);
     const uint32_t input_concept = Guest(data) ? Load32(base, data + 0x34) : 99;
     if (Guest(body) && Guest(values) && (input_concept == 5 || input_concept == 6)) {
+#if defined(BF_DEV_TOOLS)
+      if (std::getenv("BF_DEV_VMOUSE")) {
+        static thread_local std::map<uint32_t, bool> reported;
+        if (reported.size() > 64) reported.clear();
+        if (reported.emplace(helper, true).second)
+          REXLOG_INFO("BF vehicle mouse data: part {:08X} data {:08X} body {:08X} concept {} limits {:.3f} {:.3f} constrained {:08X} linear {:08X} input {:08X} reset force {:.3f}",
+                      helper, data, body, input_concept, LoadF(base, data + 0x14), LoadF(base, data + 0x18),
+                      Load32(base, data + 0x2C), Load32(base, data + 0x44), input, LoadF(base, data + 0x40));
+      }
+#endif
+      // ResetForceModifier is the game's restoring force towards neutral.
+      // Aircraft elevators/ailerons use this same helper, but are spring-loaded
+      // control surfaces, not aiming turrets. Their ordinary flight stick must
+      // reach the original helper without a persistent target-angle controller.
+      if (LoadF(base, data + 0x40) != 0.0f) {
+#if defined(BF_DEV_TOOLS)
+        if (std::getenv("BF_DEV_VMOUSE")) {
+          static thread_local std::chrono::steady_clock::time_point logged[8]{};
+          const auto now = std::chrono::steady_clock::now();
+          if (now - logged[input_concept] > std::chrono::milliseconds(100)) {
+            logged[input_concept] = now;
+            REXLOG_INFO("BF control surface: concept {} input {:.5f} angle {:.5f} speed {:.5f}",
+                        input_concept, LoadF(base, values + 4 * (input_concept + 2)), Angle(base, body),
+                        AngularSpeed(base, body));
+          }
+        }
+#endif
+        __imp__sub_822ADE38(ctx, base);
+        return;
+      }
       // The mouse's movement since the last call, as yaw and pitch radians (shared by the seat's parts: taken once
       // a tick's worth, then each part takes its axis). Read it before taking
       // g_mutex: LookPad holds the look-state lock while asking for our output.
@@ -166,9 +197,9 @@ REX_HOOK_RAW(sub_822ADE38) {
         g_want[input_concept] = float(s), g_want_at[input_concept] = now;
 #if defined(BF_DEV_TOOLS)
         static const bool dev = std::getenv("BF_DEV_VMOUSE") != nullptr;
-        static auto logged = now;
-        if (dev && now - logged > std::chrono::milliseconds(250)) {
-          logged = now;
+        static std::chrono::steady_clock::time_point logged[8]{};
+        if (dev && now - logged[input_concept] > std::chrono::milliseconds(250)) {
+          logged[input_concept] = now;
           REXLOG_INFO("BF vehicle mouse: part {:08X} concept {} angle {:.4f} target {:.4f} speed {:.3f} input {:.3f}",
                       helper, input_concept, angle, p.target, speed, s);
         }

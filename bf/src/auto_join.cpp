@@ -891,6 +891,7 @@ void FlashCalls(PPCContext& ctx, uint8_t* base) {
 namespace bf1943 {
 #if defined(BF_DEV_TOOLS)
 void DevTypesTick(const uint8_t* base);  // dev_types.cpp: BF_DEV_TYPES
+void SetTestVehicleMouse(double x, double y);  // look.cpp: raw counts/s, without OS input
 #endif
 void ModernModeTick(uint8_t* base);  // modern_mode.cpp
 uint16_t PulsedButtons();             // input_settings.cpp: our presses on the player's pad
@@ -1311,6 +1312,10 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     }
     return out;
   }();
+  const bool vehicle_mouse_scripted = std::any_of(vehicle_script.begin(), vehicle_script.end(),
+      [](const ScriptInput& input) { return input.what.rfind("mouse=", 0) == 0; });
+  if (vehicle_mouse_scripted && (!seek || menu || native_navigation || bf1943::g_walking))
+    bf1943::SetTestVehicleMouse(0, 0);
   // BF_SEEK_AFTER=<s>: the seeker stands still that long first (Wake Island's air raid test: the airfield's flag
   // taken before it walks to the bunker).
   static const double seek_after = [] {
@@ -1324,10 +1329,14 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     if (!seek_first.time_since_epoch().count()) seek_first = now;
     seek_waiting = std::chrono::duration<double>(now - seek_first).count() < seek_after;
   }
-  if (seek && !seek_waiting && bf1943::InMatch() && !menu && !bf1943::g_walking) {
+  if (seek && !seek_waiting && bf1943::InMatch() && !menu && !native_navigation && !bf1943::g_walking) {
     using SClock = std::chrono::steady_clock;
     static SClock::time_point began{}, last_press{}, off_foot_since{}, in_vehicle_at{};
     static bool in_vehicle = false;
+    static const uint32_t seek_parts = [] {
+      const char* v = std::getenv("BF_SEEK_PARTS");
+      return v && *v ? uint32_t(std::atoi(v)) : 0u;
+    }();
     const auto now = SClock::now();
     if (!began.time_since_epoch().count()) began = now;
     const bool on_foot = bf1943::LocalOnFoot();
@@ -1419,13 +1428,18 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
       if (foot_again.time_since_epoch().count() && std::chrono::duration<double>(now - foot_again).count() > 1.5)
         walked_off = true;
       const bool settled = slow_vehicles.empty() || walked_off;
+      float confirmed_position[3] = {};
+      double confirmed_distance = 0;
+      const bool target_confirmed = !seek_parts ||
+          (bf1943::TickBlendNearestTree(seek_parts, cam, confirmed_position, &confirmed_distance) && confirmed_distance < 15);
       if (!settled) {
-      } else if (seated || (off_foot_since.time_since_epoch().count() && last_press.time_since_epoch().count() && near_foot &&
-                     std::chrono::duration<double>(now - off_foot_since).count() > 1.0 && since_press < 3.0)) {
+      } else if (target_confirmed && (seated || (off_foot_since.time_since_epoch().count() && last_press.time_since_epoch().count() && near_foot &&
+                     std::chrono::duration<double>(now - off_foot_since).count() > 1.0 && since_press < 3.0))) {
         in_vehicle = true;
         in_vehicle_at = now;
         REXLOG_INFO("BF seek: in a vehicle {:.1f} s after the match began",
                     std::chrono::duration<double>(now - began).count());
+        if (seek_parts) REXLOG_INFO("BF seek: confirmed {} part vehicle within {:.1f} m", seek_parts, confirmed_distance);
         if (seek_fast) {
           probing = true;
           probe_until = now + std::chrono::seconds(3);
@@ -1440,10 +1454,6 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
         // heading from the walk, and turns toward the vehicle in between (0.45 s of full stick a quarter turn; which
         // way the stick turns in world terms is found from the first turn). Blocked (under 0.4 m in a walk), a quarter
         // turn right first.
-        static const uint32_t seek_parts = [] {
-          const char* v = std::getenv("BF_SEEK_PARTS");
-          return v && *v ? uint32_t(std::atoi(v)) : 0u;
-        }();
         float target[3] = {};
         double target_dist = 0;
         static float sought[3] = {};
@@ -1578,7 +1588,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
           t -= 0.45;
           leg += 1.5;
         }
-        if (steering) {
+        if (steering || seek_parts || seek_point[3] != 0) {
         } else if (turning) {
           p[12] = 0x7F, p[13] = 0xFF;  // right stick right
         } else {
@@ -1590,7 +1600,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
           const float dx = view[0] - v[0], dz = view[2] - v[2];
           near_slow = near_slow || dx * dx + dz * dz < 7.0f * 7.0f;
         }
-        if (near_slow || (steering && target_dist > 8.0) ||
+        if (near_slow || (seek_parts && !have_sought) || (steering && target_dist > 8.0) ||
             (seek_point[3] != 0 && seek_leg + 1 < seek_points.size())) {  // not on the way: only at the vehicle sought
         } else if (since_press > 0.5) {
           last_press = now;
@@ -1607,9 +1617,15 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
       uint16_t held = 0;
       static std::set<std::string> vehicle_keys_down;
       std::set<std::string> vehicle_keys_now;
+      double mouse_x = 0, mouse_y = 0;
       for (const ScriptInput& in : vehicle_script) {
         if (t < in.at || t >= in.at + in.hold) continue;
         const std::string& w = in.what;
+        if (w.rfind("mouse=", 0) == 0) {
+          double x = 0, y = 0;
+          if (std::sscanf(w.c_str() + 6, "%lf:%lf", &x, &y) == 2) mouse_x += x, mouse_y += y;
+          continue;
+        }
         if (w.rfind("key=", 0) == 0) {
           vehicle_keys_now.insert(w.substr(4));
           continue;
@@ -1627,6 +1643,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
         if (w == "rt") p[7] = 0xFF;
       }
       ScriptKeys(vehicle_keys_down, vehicle_keys_now);
+      if (vehicle_mouse_scripted) bf1943::SetTestVehicleMouse(mouse_x, mouse_y);
       const uint16_t b = uint16_t(p[4] << 8 | p[5]) | held;
       p[4] = uint8_t(b >> 8), p[5] = uint8_t(b);
       ++packet;

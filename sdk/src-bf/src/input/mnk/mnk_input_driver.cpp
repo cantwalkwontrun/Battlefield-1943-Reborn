@@ -32,6 +32,8 @@ REXCVAR_DEFINE_BOOL(mnk_mouse, true, "Input",
                     "from the keybind_rstick_* keys only");
 REXCVAR_DEFINE_DOUBLE(mnk_sensitivity, 1.0, "Input", "Mouse sensitivity for right stick")
     .range(0.01, 10.0);
+REXCVAR_DEFINE_BOOL(mnk_mouse_stick, true, "Input",
+                   "Translate raw mouse movement to the emulated right stick (off when the game handles raw motion)");
 
 REXCVAR_DEFINE_STRING(keybind_a, "Space", "Input/Keybinds/Controller", "A button: jump (vehicles: change seat)");
 REXCVAR_DEFINE_STRING(keybind_b, "E", "Input/Keybinds/Controller", "B button: enter, use, pick up (vehicles: exit)");
@@ -453,7 +455,7 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
                                  uint32_t(uint16_t(int16_t(std::clamp(ry, -32767, 32767)))) << 16,
                              std::memory_order_relaxed);
 
-  if (context == KeyboardContext::kGameplay && REXCVAR_GET(mnk_mouse) && IsMouseLookActive()) {
+  if (context == KeyboardContext::kGameplay && REXCVAR_GET(mnk_mouse) && REXCVAR_GET(mnk_mouse_stick) && IsMouseLookActive()) {
     double sensitivity = REXCVAR_GET(mnk_sensitivity);
     constexpr double kBaseScale = 200.0;
     rx += static_cast<int32_t>(double(mouse_dx_) * sensitivity * kBaseScale);

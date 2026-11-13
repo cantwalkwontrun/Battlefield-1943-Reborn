@@ -215,12 +215,13 @@ void DevViewSample(uint8_t* base, uint32_t view) {
   ++samples;
   const uint8_t* a = base + view + 0x40;
   const uint8_t* b = base + view + 0x80;
-  REXLOG_INFO("BF view: sample {} at {} A {} pos {:.4f} {:.4f} {:.4f} fwd {:.4f} {:.4f} B {} pos {:.4f} {:.4f} {:.4f}",
+  REXLOG_INFO("BF view: sample {} at {} A {} pos {:.4f} {:.4f} {:.4f} fwd {:.4f} {:.4f} B {} pos {:.4f} {:.4f} {:.4f} attitude {:.5f} {:.5f} {:.5f}",
               samples,
               std::chrono::duration_cast<std::chrono::microseconds>(
                   std::chrono::steady_clock::now().time_since_epoch()).count(),
               IsTransform(a), BeFloat(a + 48), BeFloat(a + 52), BeFloat(a + 56), BeFloat(a + 32), BeFloat(a + 40),
-              IsTransform(b), BeFloat(b + 48), BeFloat(b + 52), BeFloat(b + 56));
+              IsTransform(b), BeFloat(b + 48), BeFloat(b + 52), BeFloat(b + 56),
+              BeFloat(a + 36), BeFloat(a + 4), BeFloat(a + 20));
 }
 
 void DevViewLogFrame(uint8_t*) {}

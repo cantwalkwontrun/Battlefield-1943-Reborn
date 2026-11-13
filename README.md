@@ -1,3 +1,7 @@
+---
+lang: en-GB
+---
+
 <p align="center">
   <img src="docs/images/alpha-playtest-banner.png" alt="Battlefield 1943 Reborn: early playtest, alpha, subject to change" width="100%">
 </p>
@@ -140,9 +144,10 @@ Keyboard bindings.
 | Esc or Enter | pause menu | pause menu |
 | F2 | performance metrics | the same |
 
-Planes: flying with keyboard and mouse is not right yet (see [Known issues](#known-issues)): take a boat to get to
-land, or fly with a controller. On a controller planes fly as on the Xbox 360: left trigger throttle, right stick pitch
-and roll, left stick rudder, right bumper bombs, left bumper free look.
+Planes: move the mouse to pitch and roll; stopping it centres the steering command. W supplies throttle, A/D rudder
+and I/K/J/L digital pitch/roll, using the current editable bindings. See [mouse flight and verification](docs/MOUSE-FLIGHT.md).
+On a controller planes retain the Xbox 360 layout: left trigger throttle, right stick pitch and roll, left stick rudder,
+right bumper bombs, left bumper free look.
 
 Controllers: Xbox controllers play as on the console, with the game's own button layouts (Normal, Southpaw, Lefty)
 for soldiers, land vehicles and planes. Button prompts can show Xbox 360, Xbox Series, PlayStation 3, PlayStation 5
@@ -183,8 +188,8 @@ player logs in to and which lists every server.
 
 This is an alpha. The main ones in 0.3.0:
 
-- **Avoid flying with mouse and keyboard for now.** Take a boat to get to land, or use a controller to fly
-  (controllers fly as on the Xbox 360). This will be fixed in a later update; mouse and keyboard work everywhere else.
+- Relative mouse aircraft steering has synthetic background coverage; physical mouse feel, other aircraft and extended
+  multiplayer handling still need playtesting. The original aircraft physics are retained.
 - The first person weapon and hands still move 30 times a second at high frame rates (the view itself turns on every
   frame).
 - Stats, awards and leaderboards are kept only while the official backend runs: they reset when it restarts.

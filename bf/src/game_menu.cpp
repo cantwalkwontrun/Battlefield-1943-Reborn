@@ -1480,15 +1480,15 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (fade > 0) d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(6, 7, 5, int(255 * fade)));
   }
 
-  // The flying notice (TekRantGaming, 11 Nov 2026): flying a plane on mouse and keyboard is not right yet, so Home and the main
-  // menu say so until a later update fixes it. A box `w` wide whose top right corner is `tr`; `u` is the menus' unit
+  // Flight guidance in the existing native-style notice. Avoid fixed key names here: bindings are editable.
+  // A box `w` wide whose top right corner is `tr`; `u` is the menus' unit
   // (one pixel of a 1080 high window).
   static void FlyingNotice(ImDrawList* d, ImVec2 tr, float w, float u) {
     const kit::Fonts& f = kit::GetFonts();
-    const std::string label = "PLAYTEST NOTICE";
-    const std::string heading = "AVOID FLYING WITH MOUSE AND KEYBOARD FOR NOW";
-    const std::string body = "Take a boat to get to land, or use a controller to fly. This will be fixed in a later "
-                             "update. Mouse and keyboard work everywhere else.";
+    const std::string label = "FLIGHT CONTROLS";
+    const std::string heading = "KEYBOARD AND MOUSE FLIGHT";
+    const std::string body = "Move the mouse to pitch and roll; stop moving to centre the controls. Use your vehicle "
+                             "throttle and rudder bindings. Adjust Vehicle sensitivity under Controls > Keyboard & mouse.";
     const float pad = 24 * u, x = tr.x - w + 6 * u + pad, tw = w - 6 * u - 2 * pad;
     // The heading on one line: smaller when the box is narrow.
     const float k = std::min(1.0f, tw / std::max(1.0f, kit::SpacedWidth(f.ui_bold, 27 * u, heading, 2 * u)));
