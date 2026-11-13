@@ -29,9 +29,12 @@
 #include <rex/hook.h>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/ui/keybinds.h>
+#include <rex/ui/virtual_key.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
+
+#include "keyboard_controls.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -113,6 +116,7 @@ struct Driver {
   bool exit_chosen = false;          // the player chose Exit Game (no notice follows)
   bool player_ok = false;            // the player's own A on BF's autosave notice (the sign in's A)
   int dialogs = 0;                    // the game's dialogs open now (its menu's numDialogs command)
+  controls::NativeScreenState native_screen;
   Clock::time_point dialog_at{};      // when the first of them opened
   int notice_presses = 0;             // our A presses on the autosave notice in this start
   Clock::time_point notice_at{};      // the last of them
@@ -561,6 +565,12 @@ REX_HOOK_RAW(sub_826B6628) {
     const char* v = std::getenv("BF_DEV_CMDLOG");
     return (v && *v == '1') || bf1943::TraceOn();
   }();
+  const char* command = ctx.r3.u32 ? reinterpret_cast<const char*>(base + ctx.r3.u32) : "";
+  if (!std::strcmp(command, "enterMenu") || !std::strcmp(command, "enableGameInput")) {
+    const char* value = ctx.r4.u32 ? reinterpret_cast<const char*>(base + ctx.r4.u32) : "";
+    std::lock_guard lock(bf1943::g.mutex);
+    bf1943::g.native_screen.Observe(command, value);
+  }
   // numDialogs <n>: how many of the game's dialogs are open (the sign in's autosave notice, MenuDriver's kTitleDone).
   if (const uint32_t n = ctx.r3.u32; n && std::memcmp(base + n, "numDialogs", 11) == 0) {
     const int open = ctx.r4.u32 ? std::atoi(reinterpret_cast<const char*>(base + ctx.r4.u32)) : 0;
@@ -990,6 +1000,23 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     if (seen.insert(key).second)
       REXLOG_INFO("BF pad read: user {:X} flags {:X} (lr {:08X})", user, ctx.r4.u32, uint32_t(ctx.lr));
   }
+  if (driver && user == 0 && state) {
+    using rex::input::mnk::KeyboardContext;
+    const bool overlay = bf1943::GameMenuOpen(), passing = bf1943::GameMenuPassing();
+    const bool in_world = bf1943::LocalOnFoot() || bf1943::LocalSeated(base);
+    bool title = false, dialog = false, native_screen = false;
+    {
+      std::lock_guard lock(bf1943::g.mutex);
+      title = bf1943::g.stage == bf1943::Stage::kBoot;
+      dialog = bf1943::g.dialogs > 0;
+      native_screen = bf1943::g.native_screen.Active();
+    }
+    const bool walking = bf1943::g_walking.load();
+    const bool native = bf1943::controls::NativeMenuNeedsKeyboard(overlay, walking, passing || native_screen, in_world, dialog);
+    rex::input::mnk::SetKeyboardContext(overlay || walking ? KeyboardContext::kOverlay
+                                          : native ? (title ? KeyboardContext::kTitle : KeyboardContext::kNativeMenu)
+                                                   : KeyboardContext::kGameplay);
+  }
   if (original) original(ctx, base);
   // Our calls into the game's menu (Flash calls, game commands) run on every player 1 read, with or without our menu.
   if (user == 0 && state) bf1943::FlashCalls(ctx, base);
@@ -1002,6 +1029,9 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   }
   uint8_t* p = base + state;
   static uint16_t last_real = 0;
+  const auto keyboard_context = rex::input::mnk::GetKeyboardContext();
+  const bool native_navigation = keyboard_context == rex::input::mnk::KeyboardContext::kNativeMenu ||
+                                 keyboard_context == rex::input::mnk::KeyboardContext::kTitle;
 #if defined(BF_DEV_TOOLS)
   // BF_REAL_PAD=<s>:<button>[/<hold s>],... (tests): buttons on the real pad's state, from the process start, as if
   // pressed on the controller (a, b, start, up, down), before anything of ours reads it. BF_REAL_PAD_FROM=seated: from the
@@ -1093,11 +1123,19 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     // Whether our menu was open before it gets this read's presses: the Start that closes it must not open it again
     // if the menu closes between here and the check below.
     const bool menu_was_open = bf1943::GameMenuOpen();
-    bf1943::GameMenuPad(uint16_t(buttons & ~rex::input::mnk::LastKeyButtons()), key_axes ? 0 : int16_t(p[8] << 8 | p[9]),
+    bf1943::GameMenuPad(passing && native_navigation ? buttons : uint16_t(buttons & ~rex::input::mnk::LastKeyButtons()),
+                        key_axes ? 0 : int16_t(p[8] << 8 | p[9]),
                         key_axes ? 0 : int16_t(p[10] << 8 | p[11]));
     // Start in a match: our pause opens (game_menu.cpp, PausePage), in place of the game's, which never opens (the
     // Start is taken from the game's pad). The keyboard's Esc too (game_menu.cpp sees it while our menu is closed).
-    const bool esc = bf1943::TakeEscapePress();
+    const bool escape_event = bf1943::TakeEscapePress();
+    static bool escape_was_down = false;
+    const uint16_t escape_key = uint16_t(rex::ui::VirtualKey::kEscape);
+    const bool escape_down = rex::input::mnk::LastKeyDown(escape_key);
+    const bool esc = keyboard_context == rex::input::mnk::KeyboardContext::kGameplay &&
+                     !rex::input::mnk::LastKeyBlocked(escape_key) &&
+                     (escape_event || (escape_down && !escape_was_down));
+    escape_was_down = escape_down;
     const bool start = ((buttons & 0x0010) && !(last_real & 0x0010)) || esc;
     bf1943::NotePlayerButtons(uint16_t(buttons & ~last_real));
     last_real = buttons;
@@ -1181,7 +1219,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   }();
   if (!input_off)  // Settings > Controls
     bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, bf1943::LocalSeated(base));
-  if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4);  // look.cpp: the mouse in a vehicle
+  if (!menu && !bf1943::g_walking && !native_navigation) bf1943::LookPad(p + 4);  // look.cpp: the mouse in a vehicle
   const uint16_t buttons = uint16_t(p[4] << 8 | p[5]) | press;
   p[4] = uint8_t(buttons >> 8);
   p[5] = uint8_t(buttons);
@@ -1669,15 +1707,20 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     p[4] = uint8_t(b >> 8), p[5] = uint8_t(b);
     ++packet;
   }
-  // BF_DEV_PADLOG=1 (tests): each change of the buttons, triggers or left stick the game gets, on foot or seated
-  // (the keyboard's mappings; the right stick is left out, the mouse moves it all the time in a vehicle).
+  // BF_DEV_PADLOG=1 (tests): each change of the full pad state and keyboard
+  // routing context, including the right stick used by digital flight controls.
   {
     static const bool padlog = std::getenv("BF_DEV_PADLOG") != nullptr;
-    static uint8_t logged[8] = {};
-    if (padlog && std::memcmp(logged, p + 4, 8)) {
-      std::memcpy(logged, p + 4, 8);
-      REXLOG_INFO("BF pad: buttons {:04X} lt {} rt {} lx {} ly {} ({})", uint16_t(p[4] << 8 | p[5]), p[6], p[7],
+    static uint8_t logged[12] = {};
+    static int logged_context = -1;
+    const int context = int(rex::input::mnk::GetKeyboardContext());
+    if (padlog && (std::memcmp(logged, p + 4, sizeof(logged)) || context != logged_context)) {
+      std::memcpy(logged, p + 4, sizeof(logged));
+      logged_context = context;
+      REXLOG_INFO("BF pad: buttons {:04X} lt {} rt {} lx {} ly {} rx {} ry {} context {} ({})",
+                  uint16_t(p[4] << 8 | p[5]), p[6], p[7],
                   int16_t(p[8] << 8 | p[9]), int16_t(p[10] << 8 | p[11]),
+                  int16_t(p[12] << 8 | p[13]), int16_t(p[14] << 8 | p[15]), context,
                   bf1943::LocalSeated(base) ? "seated" : bf1943::LocalOnFoot() ? "on foot" : "neither");
     }
   }

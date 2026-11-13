@@ -72,6 +72,8 @@ std::atomic<bool> g_dev_camera_valid{false};
 namespace bf1943 {
 bool GameMenuOpen();  // game_menu.cpp
 void PulseButton(uint16_t button, int ms);  // input_settings.cpp: our press on the player's pad
+void ResetGameplayInput();                // input_settings.cpp: focus/menu input must not stay latched
+void ResetVehicleMouse();                 // vehicle_mouse.cpp: discard a previous seat's mouse target
 bool LocalOnFoot();  // below
 // A notch of the mouse wheel: on foot, BF's Toggle Weapon (the right bumper; BF's own Help & Options > Controls, run
 // help3: Y is Draw Knife). In a vehicle the right bumper fires the second weapon or drops bombs (run helpveh1), so the
@@ -237,8 +239,29 @@ double Density(const State& s) {
   return d > 0.25 ? d : 1.0;
 }
 
-class Listener : public rex::ui::WindowInputListener {
+void ClearMouseInput() {
+  std::lock_guard lock(g.mutex);
+  g.raw_dx = g.raw_dy = g.vehicle_dx = g.vehicle_dy = 0;
+  g.mouse_yaw = g.mouse_pitch = g.off_yaw = g.off_pitch = 0;
+  g.rate_yaw = g.rate_pitch = 0;
+  g.vehicle_moved = {};
+  g.pad_moves.clear();
+}
+
+class Listener : public rex::ui::WindowInputListener, public rex::ui::WindowListener {
  public:
+  void OnLostFocus(rex::ui::UISetupEvent&) override {
+    ClearMouseInput();
+    bf1943::ResetVehicleMouse();
+    bf1943::ResetGameplayInput();
+  }
+  void OnClosing(rex::ui::UIEvent&) override {
+    ClearMouseInput();
+    bf1943::ResetVehicleMouse();
+    bf1943::ResetGameplayInput();
+    std::lock_guard lock(g.mutex);
+    g.window = nullptr;
+  }
   void OnMouseMove(rex::ui::MouseEvent& e) override {
     if ((e.dx() == 0.0f && e.dy() == 0.0f) || !MouseLook() || bf1943::GameMenuOpen()) return;
     std::lock_guard lock(g.mutex);
@@ -284,6 +307,7 @@ void InstallLook(rex::ui::Window* window) {
   if (!window || g.window) return;
   g.window = window;
   window->AddInputListener(&g_listener, 1000);  // ahead of the runtime's, which still gets every event
+  window->AddListener(&g_listener);
 }
 
 // Once a frame (VdSwap, frame_stats.cpp): this frame's time, the mouse since the last frame, and the offsets the
@@ -296,10 +320,17 @@ void LookFrame() {
   g.frame_valid = true;
   g.frame_id++;
   // Our menu takes the mouse back from the game (the pointer is free to pick rows), and gives it back on closing.
-  const bool menu = GameMenuOpen();
+  const bool menu = GameMenuOpen() || rex::input::mnk::GetKeyboardContext() != rex::input::mnk::KeyboardContext::kGameplay;
   if (menu != g.menu_mouse_off) {
     g.menu_mouse_off = menu;
     rex::input::mnk::SetMouseLookActive(!menu);
+    if (menu) {
+      g.raw_dx = g.raw_dy = g.vehicle_dx = g.vehicle_dy = 0;
+      g.vehicle_moved = {};
+      g.pad_moves.clear();
+      ResetVehicleMouse();
+      ResetGameplayInput();
+    }
   }
 #if defined(BF_DEV_TOOLS)
   const double dev_t = std::chrono::duration<double>(now - g.first_aim).count();
@@ -390,11 +421,26 @@ void LookPad(uint8_t* gamepad) {
   }
 #endif
   if (Alive(g, now) && REXCVAR_GET(bf_look)) return;
+  if (!MouseLook()) {
+    g.pad_moves.clear();
+    ResetVehicleMouse();
+    return;
+  }
   // A vehicle's guns and turrets: the mouse aims them (vehicle_mouse.cpp), its wanted input given as the right stick.
   {
     auto axis = [&](int at) { return float(int16_t(uint16_t(gamepad[at]) << 8 | gamepad[at + 1])) / 32767.0f; };
     float x = 0, y = 0;
-    if (VehicleMouseStick(axis(8), axis(10), &x, &y)) {
+    const float manual_x = axis(8), manual_y = axis(10);
+    const bool mouse = VehicleMouseStick(manual_x, manual_y, &x, &y);
+    // Keyboard pitch/roll (I/K/J/L by default), or a controller stick, wins
+    // immediately. Mouse movement must not counter-steer a held flight key.
+    if (rex::input::mnk::LastKeyRightStick(false) || rex::input::mnk::LastKeyRightStick(true) ||
+        std::fabs(manual_x) > 0.3f || std::fabs(manual_y) > 0.3f) {
+      g.pad_moves.clear();
+      g.vehicle_dx = g.vehicle_dy = 0;
+      return;
+    }
+    if (mouse) {
       auto put = [](uint8_t* p, double a) {  // past the game's dead zone (0.15), as `add` below
         const double send = a == 0 ? 0.0 : std::copysign(0.15 + std::min(1.0, std::fabs(a)) * 0.85, a);
         const int v = std::clamp(int(std::lround(send * 32767.0)), -32768, 32767);

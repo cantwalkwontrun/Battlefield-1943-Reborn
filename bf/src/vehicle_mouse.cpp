@@ -106,12 +106,13 @@ REX_HOOK_RAW(sub_822ADE38) {
     const uint32_t values = Load32(base, input + 0x160);
     const uint32_t input_concept = Guest(data) ? Load32(base, data + 0x34) : 99;
     if (Guest(body) && Guest(values) && (input_concept == 5 || input_concept == 6)) {
-      std::lock_guard lock(g_mutex);
-      const auto now = std::chrono::steady_clock::now();
       // The mouse's movement since the last call, as yaw and pitch radians (shared by the seat's parts: taken once
-      // a tick's worth, then each part takes its axis).
+      // a tick's worth, then each part takes its axis). Read it before taking
+      // g_mutex: LookPad holds the look-state lock while asking for our output.
       double dx = 0, dy = 0, idle = 1e9;
       const bool mouse = TakeVehicleMouse(dx, dy, idle);
+      std::lock_guard lock(g_mutex);
+      const auto now = std::chrono::steady_clock::now();
       if (now - g_taken > std::chrono::milliseconds(500)) g_dx = g_dy = 0;  // out of the seat meanwhile
       const double k = kRadiansPerCount * std::clamp(REXCVAR_GET(bf_mouse_vehicle_sensitivity), 0.05, 10.0);
       g_dx += dx * k, g_dy += dy * k * (REXCVAR_GET(bf_mouse_invert_y) ? -1.0 : 1.0);
@@ -121,19 +122,20 @@ REX_HOOK_RAW(sub_822ADE38) {
       p.seen_before = p.seen;
       p.seen = now;
       // A controller's stick in use (a value the mouse did not cause): the stick has it, the target follows.
-      const bool stick = g_real_stick && idle > 0.25;
+      const bool stick = g_real_stick;
 #if defined(BF_DEV_TOOLS)
       if (p.engaged && (!mouse || stick) && std::getenv("BF_DEV_VMOUSE"))
         REXLOG_INFO("BF vehicle mouse: part {:08X} let go ({})", helper, !mouse ? "no mouse look" : "the stick");
 #endif
       if (!mouse || stick) p.engaged = false;
+      if (stick) g_dx = g_dy = 0;
       if (!p.engaged) p.target = angle;
       // The mouse's share for this part: right is the stick's right (concept 6 positive), which turns the angle
       // down; down is the stick's down (concept 5 negative), which turns it up.
       double& share = input_concept == 6 ? g_dx : g_dy;
       const double dt = std::chrono::duration<double>(now - p.seen_before).count();
       double moved = 0;
-      if (mouse && share != 0) {
+      if (mouse && !stick && share != 0) {
         p.engaged = true;
         moved = -share;
         p.target = Wrap(p.target - share);
@@ -186,6 +188,14 @@ namespace bf1943 {
 bool VehicleMouseStick(float real_x, float real_y, float* x, float* y) {
   std::lock_guard lock(g_mutex);
   g_real_stick = std::fabs(real_x) > 0.3f || std::fabs(real_y) > 0.3f;
+  if (g_real_stick) {
+    // A held keyboard steering key or real stick takes over even while the
+    // mouse is moving. Old targets must not resume when that key is released.
+    g_dx = g_dy = 0;
+    for (auto& [helper, part] : g_parts) part.engaged = false, part.rate = 0;
+    std::fill(std::begin(g_want_at), std::end(g_want_at), std::chrono::steady_clock::time_point{});
+    return false;
+  }
   const auto now = std::chrono::steady_clock::now();
   const bool yaw = now - g_want_at[6] < std::chrono::milliseconds(150);
   const bool pitch = now - g_want_at[5] < std::chrono::milliseconds(150);
@@ -193,5 +203,15 @@ bool VehicleMouseStick(float real_x, float real_y, float* x, float* y) {
   *x = yaw ? g_want[6] : 0.0f;
   *y = pitch ? g_want[5] : 0.0f;
   return true;
+}
+
+void ResetVehicleMouse() {
+  std::lock_guard lock(g_mutex);
+  g_parts.clear();
+  g_dx = g_dy = 0;
+  g_real_stick = false;
+  std::fill(std::begin(g_want), std::end(g_want), 0.0f);
+  std::fill(std::begin(g_want_at), std::end(g_want_at), std::chrono::steady_clock::time_point{});
+  g_taken = {};
 }
 }  // namespace bf1943

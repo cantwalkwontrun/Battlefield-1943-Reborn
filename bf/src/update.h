@@ -36,6 +36,14 @@
 
 namespace bf1943::update {
 
+constexpr bool LocalBuild() {
+#if defined(BF_LOCAL_BUILD)
+  return true;
+#else
+  return false;
+#endif
+}
+
 enum class State : int {
   kIdle,         // not checked yet
   kChecking,

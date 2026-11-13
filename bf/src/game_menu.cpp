@@ -41,7 +41,9 @@
 
 #include "display_modes.h"
 #include "game_install.h"
+#include "hud_keyboard_prompts.h"
 #include "launcher_kit.h"
+#include "menu_keyboard.h"
 #include "private_match.h"
 #include "server_list.h"
 #include "projects_art.h"
@@ -491,11 +493,7 @@ ShaderProgressFn FindShaderProgress() {
   return nullptr;
 }
 
-struct Input {
-  bool up = false, down = false, left = false, right = false, accept = false, back = false;
-  bool prev_tab = false, next_tab = false;  // LB and RB (Q and E): the settings' tabs
-  bool x = false, y = false, start = false, view = false;  // the launcher's pages (F, R, P and Tab on the keyboard)
-};
+using Input = MenuInput;
 
 class GameMenu final : public rex::ui::ImGuiDialog {
  public:
@@ -775,25 +773,16 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       pad_pressed = pad_pressed_;
       pad_pressed_ = false;
     }
-    // The keyboard: arrows, Enter and Esc everywhere; the launcher's letters (F, R, P, Tab, Q and E) where nothing is
-    // typed.
-    const bool typing = page_ == Page::kName || !capture_.empty();
-    key.up |= ImGui::IsKeyPressed(ImGuiKey_UpArrow);
-    key.down |= ImGui::IsKeyPressed(ImGuiKey_DownArrow);
-    key.left |= ImGui::IsKeyPressed(ImGuiKey_LeftArrow);
-    key.right |= ImGui::IsKeyPressed(ImGuiKey_RightArrow);
-    key.accept |= ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
-    key.back |= ImGui::IsKeyPressed(ImGuiKey_Escape);
-    if (!typing) {
-      key.prev_tab |= ImGui::IsKeyPressed(ImGuiKey_Q);
-      key.next_tab |= ImGui::IsKeyPressed(ImGuiKey_E);
-      if (LauncherPage(page_)) {
-        key.x |= ImGui::IsKeyPressed(ImGuiKey_F, false);
-        key.y |= ImGui::IsKeyPressed(ImGuiKey_R, false);
-        key.start |= ImGui::IsKeyPressed(ImGuiKey_P, false);
-        key.view |= ImGui::IsKeyPressed(ImGuiKey_Tab, false);
-      }
-    }
+    // The same commands on every menu, including the server browser and pause.
+    // A direct-connect address owns its letters: typing e/r/f must not change tabs,
+    // sort or refresh the list. Ctrl+PageUp/PageDown can still leave that tab.
+    const MenuKeyboardContext keyboard_context{
+        page_ == Page::kName || (page_ == Page::kServers && browser_tab_ == 2),
+        !capture_.empty(), page_ == Page::kSettings || page_ == Page::kSetupSettings || page_ == Page::kServers,
+        io.KeyShift, io.KeyCtrl, io.KeyAlt};
+    key = CombineMenuInputs(key, ReadMenuKeyboard(keyboard_context, [](ImGuiKey k, bool repeat) {
+                       return ImGui::IsKeyPressed(k, repeat);
+                     }));
     // The kind of controller that pressed (the automatic prompts), on this thread: XInput reads of empty slots are slow.
     if (const int c = classify_press_.exchange(0)) ClassifyPadPress(c == 2);
     TrackDevice(io, pad_pressed, key);
@@ -926,7 +915,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     static const std::pair<const char*, const char*> kPlayStation[] = {
         {"A", "Cross"}, {"B", "Circle"}, {"X", "Square"}, {"Y", "Triangle"}, {"LB", "L1"}, {"RB", "R1"}};
     static const std::pair<const char*, const char*> kKeyboard[] = {
-        {"A", "Enter"}, {"B", "Esc"}, {"Y", "Y"}, {"LB", "Q"}, {"RB", "E"}};
+        {"A", "Enter"}, {"B", "Esc"}, {"X", "F"}, {"Y", "R"}, {"LB", "Q"}, {"RB", "E"},
+        {"START", "P"}, {"BACK", "Tab"}};
     std::string out, word;
     auto flush = [&] {
       if (word.empty()) return;
@@ -1041,10 +1031,14 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   float BfPicture(ImDrawList* d, ImVec2 centre_left, float h, const std::string& key_in, bool draw) {
     const kit::Style ks = PromptStyle();
     if (ks == kit::Style::kXbox360) return 0;
+    if (key_in == "LB RB") {
+      const float first = BfPicture(d, centre_left, h, "LB", draw), gap = h * 0.18f;
+      return first + gap + BfPicture(d, ImVec2(centre_left.x + first + gap, centre_left.y), h, "RB", draw);
+    }
     static const std::pair<const char*, kit::Button> kMap[] = {
         {"A", kit::Button::kA},   {"B", kit::Button::kB},   {"X", kit::Button::kX},
         {"Y", kit::Button::kY},   {"LB", kit::Button::kLB}, {"RB", kit::Button::kRB},
-        {"START", kit::Button::kStart}};
+        {"START", kit::Button::kStart}, {"BACK", kit::Button::kBack}};
     for (const auto& [name, b] : kMap)
       if (key_in == name) return kit::Glyph(d, ks, b, KeyFor(b), centre_left, h * 1.15f, draw);
     return 0;
@@ -1987,6 +1981,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     int counts[2] = {0, 0};
     for (const auto& sv : all)
       if (ModeOf(sv) == browser_mode_) ++counts[sv.official ? 0 : 1];
+    // A key that opens Direct Connect (Q/E) belongs to navigation, not its editor.
+    const bool direct_was_active = browser_tab_ == 2;
     // The tabs: LB and RB, or a click.
     if (in.prev_tab) browser_tab_ = (browser_tab_ + 2) % 3, row_ = 0;
     if (in.next_tab) browser_tab_ = (browser_tab_ + 1) % 3, row_ = 0;
@@ -2013,7 +2009,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
            IM_COL32(201, 196, 178, 255), online);
     }
     if (browser_tab_ == 2) {
-      DirectConnectPage(d, s, io, in, x0, x1, 262 * s);
+      DirectConnectPage(d, s, io, in, x0, x1, 262 * s, direct_was_active);
       return;
     }
     // This tab's servers, the busiest first (or the nearest: Y).
@@ -2154,7 +2150,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     REXLOG_INFO("BF browser: Direct connect to {}:{}", text, port);
     std::thread([this, job, found, text, port] { job->store(list_.Find(text, port, *found) ? 1 : 2); }).detach();
   }
-  void DirectConnectPage(ImDrawList* d, float s, ImGuiIO& io, const Input& in, float x0, float x1, float top) {
+  void DirectConnectPage(ImDrawList* d, float s, ImGuiIO& io, const Input& in, float x0, float x1, float top,
+                         bool accept_text) {
+    const bool enter = accept_text && !io.KeyCtrl && !io.KeyAlt &&
+                       (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false));
     // The keyboard types straight in (as on the launcher's name page, the window is asked for text input).
     {
       ImGuiContext& g = *ImGui::GetCurrentContext();
@@ -2162,12 +2161,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
     }
     auto allowed = [](unsigned c) { return std::isalnum(int(c)) || c == '.' || c == ':' || c == '-'; };
-    for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
+    for (int i = 0; accept_text && i < io.InputQueueCharacters.Size; ++i) {
       const ImWchar c = io.InputQueueCharacters[i];
       if (c < 128 && allowed(c) && direct_text_.size() < 64) direct_text_ += char(c), direct_keys_ = false;
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !direct_text_.empty()) direct_text_.pop_back();
-    if (ImGui::IsKeyPressed(ImGuiKey_V) && io.KeyCtrl)
+    if (accept_text && ImGui::IsKeyPressed(ImGuiKey_Backspace) && !direct_text_.empty()) direct_text_.pop_back();
+    if (accept_text && ImGui::IsKeyPressed(ImGuiKey_V, false) && io.KeyCtrl)
       if (const char* clip = ImGui::GetClipboardText())
         for (const char* c = clip; *c && direct_text_.size() < 64; ++c)
           if (allowed(static_cast<unsigned char>(*c))) direct_text_ += *c;
@@ -2257,7 +2256,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (in.down) direct_key_ = (direct_key_ + cols) % count;
       if (in.accept) pressed = direct_key_;
       if (in.x && !direct_text_.empty()) direct_text_.pop_back();
-    } else if (in.accept && !ImGui::IsKeyPressed(ImGuiKey_Enter) && !ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
+    } else if (in.accept && !enter) {
       direct_keys_ = true;
     }
     if (pressed >= 0) {
@@ -2272,9 +2271,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         direct_text_ += direct_letters_ ? char(std::tolower(static_cast<unsigned char>(k[0]))) : k[0];
       }
     }
-    if ((in.start || ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) && !direct_job_)
+    if ((in.start || enter) && !direct_job_)
       DirectConnect();
-    BrowserHints(d, s, x0, io.DisplaySize.y - 62 * s,
+    if (PromptStyle() == kit::Style::kKeyboard) {
+      BrowserHints(d, s, x0, io.DisplaySize.y - 62 * s,
+                   {{"Enter", "Connect"}, {"Backspace", "Delete"}, {"Ctrl+PgUp/PgDn", "Tabs"}, {"Esc", "Back"}});
+    } else BrowserHints(d, s, x0, io.DisplaySize.y - 62 * s,
                  direct_keys_ ? std::vector<std::pair<std::string, std::string>>{{"A", "Type"}, {"X", "Delete"}, {"START", "Connect"}, {"B", "Done typing"}}
                               : std::vector<std::pair<std::string, std::string>>{{"A", "Type"}, {"START", "Connect"}, {"LB", "Tabs"}, {"B", "Back"}});
     if (in.back) {
@@ -3098,16 +3100,16 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   std::vector<SettingRow> KeyRows() {
     static const std::pair<const char*, const char*> kBinds[] = {
         {"keybind_lstick_up", "Move forward / throttle"},
-        {"keybind_lstick_down", "Move back / brake"},
-        {"keybind_lstick_left", "Move left / turn left"},
-        {"keybind_lstick_right", "Move right / turn right"},
+        {"keybind_lstick_down", "Back / brake / plane free look"},
+        {"keybind_lstick_left", "Move left / turn / left rudder"},
+        {"keybind_lstick_right", "Move right / turn / right rudder"},
         {"keybind_right_trigger", "Fire"},
         {"keybind_left_trigger", "Zoom / second weapon"},
         {"keybind_a", "Jump / change seat"},
         {"keybind_b", "Enter, use, pick up / exit"},
         {"keybind_x", "Reload"},
         {"keybind_y", "Draw knife"},
-        {"keybind_left_shoulder", "Grenade, explosives"},
+        {"keybind_left_shoulder", "Grenade / explosives / free look"},
         {"keybind_right_shoulder", "Toggle weapon / second weapon"},
         {"keybind_lstick_press", "Sprint"},
         {"keybind_rstick_press", "Crouch"},
@@ -3117,15 +3119,16 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         {"keybind_dpad_down", "D-pad down"},
         {"keybind_dpad_left", "D-pad left"},
         {"keybind_dpad_right", "D-pad right"},
-        {"keybind_rstick_up", "Look up (mouse camera off)"},
-        {"keybind_rstick_down", "Look down (mouse camera off)"},
-        {"keybind_rstick_left", "Look left (mouse camera off)"},
-        {"keybind_rstick_right", "Look right (mouse camera off)"}};
+        {"keybind_rstick_up", "Look up / aircraft pitch"},
+        {"keybind_rstick_down", "Look down / aircraft pitch"},
+        {"keybind_rstick_left", "Look left / aircraft roll left"},
+        {"keybind_rstick_right", "Look right / aircraft roll right"}};
     std::vector<SettingRow> rows;
     for (const auto& [cvar, label] : kBinds) {
       SettingRow r{"Keyboard bindings", label,
-                   "Select, then press the key or mouse button for it. Esc keeps what it has. The mouse wheel toggles "
-                   "the weapon on foot."};
+                   "Select, then press the key or mouse button for it. Esc keeps the current binding. "
+                   "I/K control aircraft pitch, J/L roll and A/D rudder by default. "
+                   "The mouse wheel toggles the weapon on foot."};
       r.value = capture_ == cvar ? "Press a key" : Cvar(cvar);
       const std::string name = cvar;
       r.activate = [this, name] { capture_ = name; };
@@ -3167,11 +3170,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // ImGui's presses. Esc cancels (SettingsPanel); F2 is the metrics key.
   static std::string CapturedKey() {
     for (int k = ImGuiKey_A; k <= ImGuiKey_Z; ++k)
-      if (ImGui::IsKeyPressed(ImGuiKey(k))) return std::string(1, char('A' + (k - ImGuiKey_A)));
+      if (ImGui::IsKeyPressed(ImGuiKey(k), false)) return std::string(1, char('A' + (k - ImGuiKey_A)));
     for (int k = ImGuiKey_0; k <= ImGuiKey_9; ++k)
-      if (ImGui::IsKeyPressed(ImGuiKey(k))) return std::string(1, char('0' + (k - ImGuiKey_0)));
+      if (ImGui::IsKeyPressed(ImGuiKey(k), false)) return std::string(1, char('0' + (k - ImGuiKey_0)));
     for (int k = ImGuiKey_Keypad0; k <= ImGuiKey_Keypad9; ++k)
-      if (ImGui::IsKeyPressed(ImGuiKey(k))) return "Numpad" + std::string(1, char('0' + (k - ImGuiKey_Keypad0)));
+      if (ImGui::IsKeyPressed(ImGuiKey(k), false)) return "Numpad" + std::string(1, char('0' + (k - ImGuiKey_Keypad0)));
     static const std::pair<ImGuiKey, const char*> kNamed[] = {
         {ImGuiKey_Space, "Space"},        {ImGuiKey_Enter, "Return"},       {ImGuiKey_Backspace, "Backspace"},
         {ImGuiKey_Tab, "Tab"},            {ImGuiKey_UpArrow, "Up"},         {ImGuiKey_DownArrow, "Down"},
@@ -3190,7 +3193,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         {ImGuiKey_F7, "F7"},  {ImGuiKey_F8, "F8"},  {ImGuiKey_F9, "F9"},  {ImGuiKey_F10, "F10"}, {ImGuiKey_F11, "F11"},
         {ImGuiKey_F12, "F12"}};
     for (const auto& [k, name] : kNamed)
-      if (ImGui::IsKeyPressed(k)) return name;
+      if (ImGui::IsKeyPressed(k, false)) return name;
     // Mouse buttons, from the second frame of the capture (the click that started it is not taken).
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return "LMB";
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) return "RMB";

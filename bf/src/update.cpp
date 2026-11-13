@@ -578,6 +578,9 @@ void SetProtectedFolders(std::vector<fs::path> folders) {
 }
 
 void StartInBackground(const fs::path& state_file) {
+  // A public release must never repair or replace this user's modified build.
+  // This also skips Finish(), which otherwise restores the release binaries.
+  if (LocalBuild()) return SetState(State::kNone, "Local modified build: automatic updates disabled");
   if (g_working.exchange(true)) return;
   std::thread([state_file] {
     Finish(state_file);
@@ -587,6 +590,7 @@ void StartInBackground(const fs::path& state_file) {
 }
 
 void CheckInBackground() {
+  if (LocalBuild()) return SetState(State::kNone, "Local modified build: automatic updates disabled");
   if (g_working.exchange(true)) return;
   const int s = g_status.state;
   if (s == int(State::kChecked) || s == int(State::kInstalling) || s == int(State::kInstalled)) {
@@ -600,6 +604,7 @@ void CheckInBackground() {
 }
 
 void InstallInBackground() {
+  if (LocalBuild()) return SetState(State::kNone, "Local modified build: automatic updates disabled");
   if (g_status.state != int(State::kChecked) || g_working.exchange(true)) return;
   std::thread([] {
     Install();

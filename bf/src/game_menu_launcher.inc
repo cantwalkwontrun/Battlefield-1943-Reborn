@@ -938,7 +938,7 @@
       }
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) NameDelete();
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab)) NameRandom();
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab, false) && !io.KeyCtrl && !io.KeyAlt && !io.KeyShift) NameRandom();
     std::vector<Cue> prompts;
     if (name_keys_) {
       prompts = {{kit::Button::kA, "Type"}, {kit::Button::kX, "Delete", "Backspace"},
@@ -2530,6 +2530,48 @@
     kit::Button button;
     const char* action;
   };
+  struct KeyboardCtlRow { std::string key, action; };
+  std::vector<KeyboardCtlRow> KeyboardControlRows(int tab) {
+    const auto bind = [](const char* button) {
+      const std::string key = hud::BindingFor(button, false, [](const std::string& name) {
+        return rex::cvar::GetFlagByName(name.c_str());
+      });
+      return key.empty() ? std::string("--") : key;
+    };
+    const auto axis = [](const char* name) {
+      const std::string key = hud::PrimaryBinding(rex::cvar::GetFlagByName(name));
+      return key.empty() ? std::string("--") : key;
+    };
+    std::vector<KeyboardCtlRow> rows;
+    if (tab == 0) {
+      rows = {{axis("keybind_lstick_up") + " " + axis("keybind_lstick_left") + " " +
+                   axis("keybind_lstick_down") + " " + axis("keybind_lstick_right"), "Move"},
+              {"Mouse", "Look and aim"}, {bind("rt"), "Fire"}, {bind("lt"), "Aim"},
+              {bind("a"), "Jump"}, {bind("b"), "Enter, use or pick up"}, {bind("x"), "Reload"},
+              {bind("y"), "Draw knife / wrench"}, {bind("lb"), "Grenade / explosives"},
+              {bind("rb"), "Switch weapon (or mouse wheel)"}, {bind("ls_click"), "Sprint"},
+              {bind("rs_click"), "Crouch"}};
+    } else {
+      rows = {{axis("keybind_lstick_up"), "Throttle"},
+              {axis("keybind_lstick_down"), tab == 2 ? "Free look (aircraft)" : "Brake"},
+              {axis("keybind_lstick_left") + " " + axis("keybind_lstick_right"), tab == 2 ? "Rudder" : "Turn"},
+              {bind("rt"), "Fire"}, {bind("lt") + " / " + bind("rb"), tab == 2 ? "Drop bombs" : "Secondary weapon"},
+              {bind("a"), "Change seat"}, {bind("b"), "Exit vehicle"}, {bind("dpad_up"), "Change camera"}};
+      if (tab == 2) {
+        rows.push_back({axis("keybind_rstick_up") + " " + axis("keybind_rstick_down"), "Pitch"});
+        rows.push_back({axis("keybind_rstick_left") + " " + axis("keybind_rstick_right"), "Roll"});
+        rows.push_back({bind("lb"), "Hold for free look"});
+      } else {
+        rows.push_back({"Mouse", "Aim turret / vehicle weapon"});
+        rows.push_back({axis("keybind_rstick_up") + " " + axis("keybind_rstick_down") + " " +
+                        axis("keybind_rstick_left") + " " + axis("keybind_rstick_right"), "Keyboard aim"});
+      }
+    }
+    rows.push_back({bind("back"), "Command (tap), scoreboard (hold)"});
+    rows.push_back({"Esc", "Pause / back"});
+    rows.push_back({"Enter", "Select / deploy in native menus"});
+    return rows;
+  }
   void ControlsPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
     NotePage("controls");
     const ImVec2 sz = io.DisplaySize;
@@ -2560,7 +2602,9 @@
     }
     const float x0 = sz.x * 0.05f, x1 = sz.x * 0.95f;
     kit::Brand(d, ImVec2(x0, 58 * u), u * 0.9f);
-    kit::Spaced(d, f.typed, 20 * u, ImVec2(x0, 150 * u), kit::kKhakiDim, "THE GAME'S OWN LAYOUT", 4 * u);
+    const bool keyboard = PromptStyle() == kit::Style::kKeyboard;
+    kit::Spaced(d, f.typed, 20 * u, ImVec2(x0, 150 * u), kit::kKhakiDim,
+                keyboard ? "KEYBOARD AND MOUSE: CURRENT BINDINGS" : "THE GAME'S OWN LAYOUT", 4 * u);
     Text(d, f.stencil, 78 * u, ImVec2(x0 - 4 * u, 174 * u), kit::kCream, "CONTROLS");
     d->AddRectFilled(ImVec2(x0, 270 * u), ImVec2(x0 + 64 * u, 276 * u), kit::kStamp);
     // The tabs.
@@ -2573,22 +2617,26 @@
       kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(tx, 310 * u), i == ctl_tab_ ? kit::kCream : kit::kKhakiDim, kTabs[i], 3 * u);
       tx += w + 56 * u;
     }
-    // The rows, in two columns: the button in the player's style (a keyboard player sees the pad's; its keys are in
-    // Settings), then what it does.
-    const kit::Style style = PromptStyle() == kit::Style::kKeyboard ? kit::Style::kXboxSeries : PromptStyle();
+    // Keep the original two-column layout; keyboard users see their actual keys
+    // rather than controller buttons and a direction to another settings page.
+    const kit::Style style = PromptStyle();
     const std::vector<CtlRow>& rows = ctl_tab_ == 0 ? kSoldier : ctl_tab_ == 1 ? kVehicles : kPlanes;
-    const size_t half = (rows.size() + 1) / 2;
-    const float colw = (x1 - x0) * 0.5f, rh = 66 * u, top = 380 * u;
-    for (size_t i = 0; i < rows.size(); ++i) {
+    const auto keyboard_rows = keyboard ? KeyboardControlRows(ctl_tab_) : std::vector<KeyboardCtlRow>{};
+    const size_t count = keyboard ? keyboard_rows.size() : rows.size(), half = (count + 1) / 2;
+    const float colw = (x1 - x0) * 0.5f, rh = (keyboard ? 62 : 66) * u, top = 380 * u;
+    for (size_t i = 0; i < count; ++i) {
       const float cx = x0 + (i < half ? 0 : colw), cy = top + rh * float(i < half ? i : i - half);
       d->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + colw - 30 * u, cy + rh - 10 * u), IM_COL32(15, 17, 13, 200));
-      const float gw = kit::Glyph(d, style, rows[i].button, "", ImVec2(cx + 20 * u, cy + (rh - 10 * u) * 0.5f), 38 * u);
-      kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(cx + 40 * u + std::max(gw, 60 * u), cy + 14 * u), kit::kKhakiText,
-                  Upper(rows[i].action), 2 * u);
+      const float gw = kit::Glyph(d, style, keyboard ? kit::Button::kKey : rows[i].button,
+                                  keyboard ? keyboard_rows[i].key : "",
+                                  ImVec2(cx + 20 * u, cy + (rh - 10 * u) * 0.5f), 38 * u);
+      const float text_x = cx + 40 * u + std::max(gw, 60 * u);
+      kit::Wrapped(d, f.ui_bold, (keyboard ? 21 : 24) * u, ImVec2(text_x, cy + 10 * u), kit::kKhakiText,
+                   Upper(keyboard ? keyboard_rows[i].action : rows[i].action), cx + colw - 42 * u - text_x);
     }
     kit::Wrapped(d, f.typed, 18 * u, ImVec2(x0, top + rh * float(half) + 16 * u), kit::kKhakiDim,
-                 "Keyboard and mouse: every key is in Settings, Controls, Keyboard bindings. Buttons can be swapped in "
-                 "Settings, Controls, Button remapping.",
+                 keyboard ? "Change keys in Settings, Controls, Keyboard bindings. Held keyboard steering takes priority over mouse steering."
+                          : "Buttons can be swapped in Settings, Controls, Button remapping.",
                  x1 - x0);
     const float py = sz.y - 64 * u;
     float x = x0;
@@ -3069,6 +3117,7 @@
   // ---- Updates (update.cpp, King Kong's way; always on, TekRantGaming): checked at the start and every 6 hours while Home
   // is open; a newer release downloads by itself, and installs at once from the update page while Home is showing.
   std::string UpdateNote() {
+    if (update::LocalBuild()) return "LOCAL MODIFIED BUILD \xC2\xB7 " + std::string(BfVersion());
     auto& u = update::Get();
     const auto state = update::State(u.state.load());
     const std::string v = BfVersion();
@@ -3100,12 +3149,14 @@
     return v;
   }
   void UpdateNow() {
+    if (update::LocalBuild()) return;
     const auto state = update::State(update::Get().state.load());
     if (state == update::State::kChecked) page_ = Page::kUpdate;
     else if (state == update::State::kNone || state == update::State::kFailed) update::CheckInBackground();
   }
   // Every frame on Home: the 6 hourly check, and a checked release installs at once.
   void UpdateTick() {
+    if (update::LocalBuild()) return;
     const double now = ImGui::GetTime();
     if (now - update_checked_at_ > 6 * 3600) update_checked_at_ = now, update::CheckInBackground();
     if (update::State(update::Get().state.load()) == update::State::kChecked && page_ == Page::kHome && !quit_popup_ &&

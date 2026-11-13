@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <mutex>
 #include <cmath>
@@ -26,6 +27,8 @@
 #include <rex/cvar.h>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/ppc/context.h>
+
+#include "keyboard_controls.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -201,7 +204,8 @@ void CameraStick(uint8_t* x, uint8_t* y, bool invert_x, bool invert_y) {
   Store16(y, int(std::lround(fy * 32767.0)));
 }
 
-bool g_aim_raised = false, g_aim_was_down = false;
+controls::AimToggle g_aim;
+std::atomic<bool> g_reset_input{false};
 
 // Keyboard & mouse in a vehicle (BF's own Help & Options > Controls, runs help3 and helpveh1: land and boat vehicles
 // throttle with the left trigger, brake with the left bumper, turn with the left stick and fire their second weapon with
@@ -225,15 +229,25 @@ void KeyboardInVehicle(uint8_t* gamepad) {
 
 PPCFunc* RuntimeExportForRumble() { return RuntimeExport("__imp__XamInputSetState"); }
 
+// The window thread requests the aim reset; the pad thread owns the toggle.
+void ResetGameplayInput() {
+  g_reset_input.store(true, std::memory_order_release);
+  std::lock_guard lock(g_pulse_mutex);
+  g_pulse_until.fill({});
+}
+
 // The game's copy of the pad (X_INPUT_GAMEPAD at state + 4, big endian: buttons, triggers, sticks), after our menu
 // took what it needed. `menu_open`: our menu has the pad (the game got an empty one); the aim toggle lowers.
 // `seated`: the player sits in a vehicle (the keyboard's vehicle keys; no aim toggle, whose trigger is the throttle
 // there).
 void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated) {
-  if (menu_open) {
-    g_aim_raised = g_aim_was_down = false;
+  if (g_reset_input.exchange(false, std::memory_order_acquire)) g_aim.Reset();
+  if (menu_open || rex::input::mnk::GetKeyboardContext() != rex::input::mnk::KeyboardContext::kGameplay) {
+    g_aim.Reset();
     return;
   }
+  const controls::KeyboardAxes keys{rex::input::mnk::LastKeyLeftStick(false), rex::input::mnk::LastKeyLeftStick(true),
+                                    rex::input::mnk::LastKeyRightStick(false), rex::input::mnk::LastKeyRightStick(true)};
   if (seated) KeyboardInVehicle(gamepad);
   uint32_t in = uint32_t(gamepad[0]) << 8 | gamepad[1];
   if (gamepad[2] > 30) in |= 0x10000;
@@ -244,16 +258,21 @@ void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated) {
   for (size_t i = 0; i < std::size(kButtons); ++i)
     if (in & kButtons[i].bit) out |= remap[i];
   // Aim toggle: the left trigger as the game sees it, after remapping.
-  if (seated) g_aim_raised = g_aim_was_down = false;
-  // The aim key's own choice when the keyboard or mouse holds the trigger (the right mouse button), else the
-  // controller's.
-  const bool key_aim = rex::input::mnk::LastKeyTrigger(false) > 30;
-  const bool toggle = key_aim ? REXCVAR_GET(bf_mouse_toggle_aim) : REXCVAR_GET(bf_toggle_aim);
-  if (toggle && !seated) {
-    const bool down = out & 0x10000;
-    if (down && !g_aim_was_down) g_aim_raised = !g_aim_raised;
-    g_aim_was_down = down;
-    out = g_aim_raised ? out | 0x10000 : out & ~0x10000u;
+  if (seated) g_aim.Reset();
+  // Identify the keyboard source after remapping too: a rebound Space or mouse
+  // button that now presses LT uses the keyboard's Aim setting.
+  uint32_t key_input = rex::input::mnk::LastKeyButtons();
+  if (rex::input::mnk::LastKeyTrigger(false) > 30) key_input |= 0x10000;
+  if (rex::input::mnk::LastKeyTrigger(true) > 30) key_input |= 0x20000;
+  bool key_aim = false;
+  for (size_t i = 0; i < std::size(kButtons); ++i)
+    if ((key_input & kButtons[i].bit) && remap[i] == 0x10000) key_aim = true;
+  bool toggle = false;
+  if (!seated) {
+    const auto aim = g_aim.Update((out & 0x10000) != 0, key_aim, REXCVAR_GET(bf_mouse_toggle_aim),
+                                  REXCVAR_GET(bf_toggle_aim));
+    toggle = aim.toggle;
+    out = aim.pressed ? out | 0x10000 : out & ~0x10000u;
   }
   gamepad[0] = uint8_t(out >> 8), gamepad[1] = uint8_t(out);
   // An analog trigger keeps its own depth when it presses itself; anything else presses fully.
@@ -264,6 +283,8 @@ void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated) {
   // has its own vertical setting there.
   Stick(gamepad + 4, gamepad + 6, 1.0, REXCVAR_GET(bf_invert_ls_x), REXCVAR_GET(bf_invert_ls_y));
   CameraStick(gamepad + 8, gamepad + 10, REXCVAR_GET(bf_invert_rs_x), REXCVAR_GET(bf_invert_rs_y));
+  const auto axes = keys.Apply({Load16(gamepad + 4), Load16(gamepad + 6), Load16(gamepad + 8), Load16(gamepad + 10)}, seated);
+  for (size_t i = 0; i < axes.size(); ++i) Store16(gamepad + 4 + i * 2, axes[i]);
 }
 
 }  // namespace bf1943

@@ -1,0 +1,13 @@
+{
+  "language": "en-GB",
+  "source_url": "https://www.moddb.com/mods/spec-ops-warfare/addons/ultra-hd-sky-texture-resources-for-bf22142",
+  "attribution": "Ultra HD Sky texture resources for BF2/2142, uploaded by illicitSoul",
+  "licence": "ModDB lists Proprietary. This example grants no permission to redistribute the source artwork or converted game textures.",
+  "replacements": {
+    "coral_sea": {"image": "input/sky-resources/Hemisphericals Skies/HFD_HemiBlueSky01.jpg", "horizontal_shift": -0.13},
+    "guadal_canal": {"image": "input/sky-resources/Hemisphericals Skies/HFD_HemiClouds10.jpg"},
+    "iwo_jima_s": {"image": "input/sky-resources/Hemisphericals Skies/HFD_HemiSunset25.jpg", "horizontal_shift": -0.25},
+    "wake_island_s": {"image": "input/sky-resources/Hemisphericals Skies/HFD_HemiBlueSky04.jpg"},
+    "wake_island_tutorial": {"image": "input/sky-resources/Hemisphericals Skies/HFD_HemiBlueSky04.jpg"}
+  }
+}

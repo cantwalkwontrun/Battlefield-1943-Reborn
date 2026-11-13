@@ -493,13 +493,15 @@ const char* SetName(Style s) {
   }
 }
 
-// A light key cap with its name (the mockups' "START", "RB" tags), when there is no picture.
+// Flat, high-contrast key caps alongside Battlefield's paper, black tape and
+// condensed lettering. Geometry keeps rebound keys consistent with the HUD.
 float Cap(ImDrawList* d, const std::string& t, ImVec2 at, float h, bool draw) {
   ImFont* f = g_fonts.ui_bold;
   const float size = h * 0.5f, w = TextWidth(f, size, t) + h * 0.5f;
   if (draw) {
-    d->AddRectFilled(ImVec2(at.x, at.y - h * 0.36f), ImVec2(at.x + w, at.y + h * 0.36f), IM_COL32(233, 229, 218, 255),
-                     h * 0.16f);
+    const ImVec2 a(at.x, at.y - h * 0.42f), b(at.x + w, at.y + h * 0.42f);
+    d->AddRectFilled(a, b, IM_COL32(238, 238, 230, 255), h * 0.06f);
+    d->AddRect(a, b, IM_COL32(36, 38, 32, 255), h * 0.06f, 0, std::max(1.0f, h * 0.045f));
     d->AddText(f, size, ImVec2(at.x + h * 0.25f, at.y - size * 0.62f), kStrip, t.c_str());
   }
   return w;
@@ -509,13 +511,6 @@ float Cap(ImDrawList* d, const std::string& t, ImVec2 at, float h, bool draw) {
 float Glyph(ImDrawList* d, Style style, Button b, const std::string& key, ImVec2 at, float h, bool draw) {
   if (style == Style::kKeyboard || b == Button::kKey) {
     const std::string name = key.empty() ? "?" : key;
-    ImFontAtlasRect r;
-    if (const GlyphImage* g = Picture("keyboard", name, r)) {
-      const float w = h * float(g->w) / float(g->h);
-      if (draw) d->AddImage(ImGui::GetIO().Fonts->TexRef, ImVec2(at.x, at.y - h * 0.5f), ImVec2(at.x + w, at.y + h * 0.5f),
-                            r.uv0, r.uv1);
-      return w;
-    }
     return Cap(d, name, at, h, draw);
   }
   if (const char* set = SetName(style)) {

@@ -155,10 +155,25 @@ bool TokenPressed(const bool (&key_down)[256], std::string_view token, uint8_t l
 }
 
 std::atomic<bool> mouse_look_active{true};
+std::atomic<KeyboardContext> keyboard_context{KeyboardContext::kGameplay};
 std::atomic<uint16_t> last_key_buttons{0};
 std::atomic<bool> last_key_axes{false};
 std::atomic<uint32_t> last_key_triggers{0};  // left trigger in the low byte, right in the next
 std::atomic<uint32_t> last_key_left_stick{0};  // x in the low 16 bits, y in the high 16 (signed)
+std::atomic<uint32_t> last_key_right_stick{0};
+std::array<std::atomic<uint32_t>, 8> last_keys_down{}, last_keys_blocked{};
+
+void ClearLastKeyboardState() {
+  last_key_buttons.store(0, std::memory_order_relaxed);
+  last_key_axes.store(false, std::memory_order_relaxed);
+  last_key_triggers.store(0, std::memory_order_relaxed);
+  last_key_left_stick.store(0, std::memory_order_relaxed);
+  last_key_right_stick.store(0, std::memory_order_relaxed);
+  for (size_t i = 0; i < last_keys_down.size(); ++i) {
+    last_keys_down[i].store(0, std::memory_order_relaxed);
+    last_keys_blocked[i].store(0, std::memory_order_relaxed);
+  }
+}
 // Tests' keys (SetTestKey), held with or without the window's focus.
 std::mutex test_keys_mutex;
 bool test_keys[256] = {};
@@ -174,8 +189,19 @@ bool IsMouseLookActive() {
   return mouse_look_active.load(std::memory_order_relaxed);
 }
 
-uint16_t LastKeyButtons() { return last_key_buttons.load(std::memory_order_relaxed); }
-bool LastKeyAxes() { return last_key_axes.load(std::memory_order_relaxed); }
+void SetKeyboardContext(KeyboardContext context) { keyboard_context.store(context, std::memory_order_relaxed); }
+KeyboardContext GetKeyboardContext() { return keyboard_context.load(std::memory_order_relaxed); }
+bool LastKeyDown(uint16_t key) {
+  return key < 256 && REXCVAR_GET(mnk_mode) &&
+         (last_keys_down[key / 32].load(std::memory_order_relaxed) & (uint32_t(1) << (key % 32))) != 0;
+}
+bool LastKeyBlocked(uint16_t key) {
+  return key < 256 && REXCVAR_GET(mnk_mode) &&
+         (last_keys_blocked[key / 32].load(std::memory_order_relaxed) & (uint32_t(1) << (key % 32))) != 0;
+}
+
+uint16_t LastKeyButtons() { return REXCVAR_GET(mnk_mode) ? last_key_buttons.load(std::memory_order_relaxed) : 0; }
+bool LastKeyAxes() { return REXCVAR_GET(mnk_mode) && last_key_axes.load(std::memory_order_relaxed); }
 void SetTestKey(uint16_t virtual_key, bool down) {
   if (virtual_key >= 256) {
     return;
@@ -189,10 +215,13 @@ void SetTestKey(uint16_t virtual_key, bool down) {
 }
 
 uint8_t LastKeyTrigger(bool right) {
-  return uint8_t(last_key_triggers.load(std::memory_order_relaxed) >> (right ? 8 : 0));
+  return REXCVAR_GET(mnk_mode) ? uint8_t(last_key_triggers.load(std::memory_order_relaxed) >> (right ? 8 : 0)) : 0;
 }
 int16_t LastKeyLeftStick(bool y) {
-  return int16_t(uint16_t(last_key_left_stick.load(std::memory_order_relaxed) >> (y ? 16 : 0)));
+  return REXCVAR_GET(mnk_mode) ? int16_t(uint16_t(last_key_left_stick.load(std::memory_order_relaxed) >> (y ? 16 : 0))) : 0;
+}
+int16_t LastKeyRightStick(bool y) {
+  return REXCVAR_GET(mnk_mode) ? int16_t(uint16_t(last_key_right_stick.load(std::memory_order_relaxed) >> (y ? 16 : 0))) : 0;
 }
 
 using rex::ui::VirtualKey;
@@ -221,6 +250,7 @@ void MnkInputDriver::OnWindowAvailable(rex::ui::Window* window) {
 }
 
 void MnkInputDriver::OnClosing(rex::ui::UIEvent&) {
+  ClearLastKeyboardState();
   DetachFromWindow();
 }
 
@@ -282,6 +312,7 @@ void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
 X_RESULT MnkInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
                                                X_INPUT_CAPABILITIES* out_caps) {
   if (!IsEnabled() || id != kMnkDevice) {
+    if (id == kMnkDevice) ClearLastKeyboardState();
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   if (out_caps) {
@@ -304,12 +335,14 @@ X_RESULT MnkInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
 
 X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   if (!IsEnabled() || id != kMnkDevice) {
+    if (id == kMnkDevice) ClearLastKeyboardState();
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   // Mouse look is opt in. Without this gate, keyboard input alone would hide
   // and lock the cursor, breaking the ImGui overlays.
-  QueueMouseCaptureUpdate(IsEnabled() && REXCVAR_GET(mnk_mouse) && IsMouseLookActive() &&
+  QueueMouseCaptureUpdate(IsEnabled() && GetKeyboardContext() == KeyboardContext::kGameplay &&
+                          REXCVAR_GET(mnk_mouse) && IsMouseLookActive() &&
                           has_focus_ && is_active());
 
   bool scripted[256];
@@ -320,10 +353,7 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
     std::memcpy(scripted, test_keys, sizeof(scripted));
   }
   if (!is_active() || (!has_focus_ && !any_scripted)) {
-    last_key_buttons.store(0, std::memory_order_relaxed);
-    last_key_axes.store(false, std::memory_order_relaxed);
-    last_key_triggers.store(0, std::memory_order_relaxed);
-    last_key_left_stick.store(0, std::memory_order_relaxed);
+    ClearLastKeyboardState();
     if (out_state) {
       std::memset(out_state, 0, sizeof(*out_state));
       out_state->packet_number = packet_number_;
@@ -336,6 +366,18 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   bool keys[256];
   for (int i = 0; i < 256; ++i) {
     keys[i] = (has_focus_ && key_down_[i]) || scripted[i];
+  }
+  const KeyboardContext context = GetKeyboardContext();
+  keyboard_context_gate_.Filter(context, keys);
+  for (size_t word = 0; word < last_keys_down.size(); ++word) {
+    uint32_t down = 0, blocked = 0;
+    for (uint16_t bit = 0; bit < 32; ++bit) {
+      const uint16_t key = uint16_t(word * 32 + bit);
+      if (keys[key]) down |= uint32_t(1) << bit;
+      if (keyboard_context_gate_.Blocked(key)) blocked |= uint32_t(1) << bit;
+    }
+    last_keys_down[word].store(down, std::memory_order_relaxed);
+    last_keys_blocked[word].store(blocked, std::memory_order_relaxed);
   }
 
   uint16_t buttons = 0;
@@ -394,14 +436,24 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
     ry += INT16_MAX;
   if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_down)))
     ry -= INT16_MAX;
+  if (context != KeyboardContext::kGameplay) {
+    // Fixed native-screen navigation supplements the user's action bindings.
+    // Return confirms rather than pausing; Esc cancels; Page Up/Down change tabs.
+    buttons = NativeMenuActionButtons(keys, context, buttons);
+    lx = ly = rx = ry = 0;
+    lt = rt = 0;
+  }
   last_key_buttons.store(buttons, std::memory_order_relaxed);
   last_key_axes.store(lx || ly || rx || ry || lt || rt, std::memory_order_relaxed);
   last_key_triggers.store(uint32_t(lt) | uint32_t(rt) << 8, std::memory_order_relaxed);
   last_key_left_stick.store(uint32_t(uint16_t(int16_t(std::clamp(lx, -32767, 32767)))) |
                                 uint32_t(uint16_t(int16_t(std::clamp(ly, -32767, 32767)))) << 16,
                             std::memory_order_relaxed);
+  last_key_right_stick.store(uint32_t(uint16_t(int16_t(std::clamp(rx, -32767, 32767)))) |
+                                 uint32_t(uint16_t(int16_t(std::clamp(ry, -32767, 32767)))) << 16,
+                             std::memory_order_relaxed);
 
-  if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive()) {
+  if (context == KeyboardContext::kGameplay && REXCVAR_GET(mnk_mouse) && IsMouseLookActive()) {
     double sensitivity = REXCVAR_GET(mnk_sensitivity);
     constexpr double kBaseScale = 200.0;
     rx += static_cast<int32_t>(double(mouse_dx_) * sensitivity * kBaseScale);
@@ -630,12 +682,14 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
 
 void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
   has_focus_ = false;
+  ClearLastKeyboardState();
   // Withdraw the request too, or an update queued before the focus loss grabs
   // the cursor straight back.
   mouse_capture_requested_.store(false, std::memory_order_relaxed);
   {
     std::lock_guard lock(state_mutex_);
     std::memset(key_down_, 0, sizeof(key_down_));
+    keyboard_context_gate_.Reset();
     mouse_dx_ = 0.0f;
     mouse_dy_ = 0.0f;
   }

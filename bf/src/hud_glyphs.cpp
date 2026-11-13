@@ -26,6 +26,8 @@
 #include <rex/logging.h>
 #include <rex/ui/image_decode.h>
 
+#include "hud_keyboard_prompts.h"
+
 namespace bf1943 {
 
 std::filesystem::path ExecutableDir();  // shader_prep.cpp
@@ -103,34 +105,48 @@ const Picture* Load(const std::string& set, const std::string& name) {
   return slot.rgba.empty() ? nullptr : &slot;
 }
 
-// The keyboard's key for a controller button (the SDK's keybind_* settings), as a picture name.
-std::string KeyFor(const std::string& button) {
-  static const std::map<std::string, const char*> kBinds = {
-      {"a", "keybind_a"},           {"b", "keybind_b"},
-      {"x", "keybind_x"},           {"y", "keybind_y"},
-      {"lb", "keybind_left_shoulder"}, {"rb", "keybind_right_shoulder"},
-      {"lt", "keybind_left_trigger"}, {"rt", "keybind_right_trigger"},
-      {"start", "keybind_start"},   {"back", "keybind_back"},
-      {"dpad_up", "keybind_dpad_up"}, {"dpad_down", "keybind_dpad_down"},
-      {"dpad_left", "keybind_dpad_left"}, {"dpad_right", "keybind_dpad_right"},
-      {"ls_click", "keybind_lstick_press"}, {"rs_click", "keybind_rstick_press"}};
-  if (button == "ls" || button == "ls_lr" || button == "ls_ud") return "WASD";
-  if (button == "rs" || button == "rs_lr" || button == "rs_ud") return "Mouse_Simple";
-  auto it = kBinds.find(button);
-  if (it == kBinds.end()) return {};
-  std::string k = rex::cvar::GetFlagByName(it->second);
-  if (k == "Return") k = "Enter";
-  if (k == "Escape") k = "Esc";
-  if (k == "Control") k = "Ctrl";
-  return k;
+// The first key that really presses this game button. Commas are alternatives, not part of a PNG filename.
+std::string KeyFor(const std::string& button, bool menu) {
+  // Menus use fixed accept/back; gameplay resolves the inverse of ApplyControllerSettings' button remap.
+  return hud::BindingFor(button, menu, [](const std::string& flag) { return rex::cvar::GetFlagByName(flag); });
+}
+
+const Picture* KeyboardPicture(const std::string& button, bool menu) {
+  const bool left = button == "ls" || button == "ls_lr" || button == "ls_ud";
+  const bool right = button == "rs" || button == "rs_lr" || button == "rs_ud";
+  const bool mouse = right && rex::cvar::GetFlagByName("mnk_mouse") != "false";
+  std::array<std::string, 4> move;
+  std::string signature;
+  if ((left || right) && !mouse) {
+    const std::string stick = left ? "lstick" : "rstick";
+    const char* directions[] = {"up", "left", "down", "right"};
+    for (size_t i = 0; i < move.size(); ++i) {
+      move[i] = hud::PrimaryBinding(rex::cvar::GetFlagByName("keybind_" + stick + "_" + directions[i]));
+      signature += move[i] + ",";
+    }
+  } else {
+    signature = mouse ? "Mouse_Simple" : KeyFor(button, menu);
+  }
+  struct Slot { std::string signature; Picture picture; };
+  // One slot per atlas role/button bounds the cache when bindings are edited repeatedly.
+  static std::map<std::string, Slot> slots;
+  auto& slot = slots[(menu ? "menu/" : "hud/") + button];
+  if (slot.picture.rgba.empty() || slot.signature != signature) {
+    auto p = (left || right) && !mouse
+                 ? hud::Movement(move, button.find("_ud") == std::string::npos,
+                                 button.find("_lr") == std::string::npos)
+                 : hud::Keycap(signature);
+    slot.signature = signature;
+    slot.picture = {p.w, p.h, std::move(p.rgba)};
+  }
+  return &slot.picture;
 }
 
 // The picture for a button in a style: the set's own, else Xbox Series'. The d-pad's directions are its up turned.
-const Picture* PictureFor(const std::string& set, const std::string& button, int& turns) {
+const Picture* PictureFor(const std::string& set, const std::string& button, int& turns, bool menu) {
   turns = 0;
   if (set == "keyboard") {
-    if (const Picture* p = Load("keyboard", KeyFor(button))) return p;
-    return PictureFor("xbox_series", button, turns);
+    return KeyboardPicture(button, menu);
   }
   std::string name = button;
   if (button.rfind("dpad_", 0) == 0) {
@@ -144,7 +160,7 @@ const Picture* PictureFor(const std::string& set, const std::string& button, int
     name = "stick_move";
   }
   if (const Picture* p = Load(set, name)) return p;
-  return set == "xbox_series" ? nullptr : PictureFor("xbox_series", button, turns);
+  return set == "xbox_series" ? nullptr : PictureFor("xbox_series", button, turns, menu);
 }
 
 // `p` drawn into the rectangle, fitted and centred, bilinear, over a cleared rectangle.
@@ -209,7 +225,8 @@ bool Patch(uint32_t width, uint32_t height, const uint8_t* guest, std::vector<ui
   int drawn = 0;
   for (const Rect& r : atlas->rects) {
     int turns = 0;
-    if (const Picture* p = PictureFor(set, r.button, turns)) Draw(rgba, width, r, *p, turns), ++drawn;
+    if (const Picture* p = PictureFor(set, r.button, turns, std::string_view(atlas->name) != "hud_root_cq"))
+      Draw(rgba, width, r, *p, turns), ++drawn;
   }
   // The host texture holds each guest word byte swapped (B, G, R, A, as the loader writes it; run glyph1 showed the
   // flags red for blue with R, G, B, A).

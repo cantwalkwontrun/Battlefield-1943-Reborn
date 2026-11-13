@@ -11,6 +11,7 @@
 #pragma once
 
 #include <rex/input/input_driver.h>
+#include <rex/input/mnk/keyboard_routing.h>
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
 
@@ -24,15 +25,20 @@ namespace rex::input::mnk {
 
 void SetMouseLookActive(bool active);
 bool IsMouseLookActive();
+void SetKeyboardContext(KeyboardContext context);
+KeyboardContext GetKeyboardContext();
+bool LastKeyDown(uint16_t virtual_key);
+bool LastKeyBlocked(uint16_t virtual_key);
 
 // What the keys gave the controller state at its last read: the buttons (XInput bits) and whether any key pushed a
 // stick or a trigger. A game's own menus that read the keyboard themselves can leave these out of the controller
 // state they take, so a key bound to a game action (E to B, Space to A) does not also act in the menu.
 uint16_t LastKeyButtons();
 bool LastKeyAxes();
-// The triggers (0 or 255) and the left stick (-32767 to 32767, up positive) the keys gave at the last read.
+// The triggers (0 or 255) and sticks (-32767 to 32767, up positive) the keys gave at the last read.
 uint8_t LastKeyTrigger(bool right);
 int16_t LastKeyLeftStick(bool y);
+int16_t LastKeyRightStick(bool y);
 // Tests: a key held as if pressed on the keyboard (a VirtualKey), with or without the window's focus (a test window
 // in the background has none).
 void SetTestKey(uint16_t virtual_key, bool down);
@@ -87,6 +93,7 @@ class MnkInputDriver final : public InputDriver,
 
   std::mutex state_mutex_;
   bool key_down_[256] = {};
+  KeyboardContextGate keyboard_context_gate_;
 
   // Mouse delta tracking. Fractional because relative motion arrives in
   // fractions of a pixel, and truncating each event drops slow movement.

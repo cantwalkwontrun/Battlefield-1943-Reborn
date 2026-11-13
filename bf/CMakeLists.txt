@@ -87,6 +87,10 @@ endif()
 # Players get our Vulkan renderer only (DECISIONS.md, 5 Nov 2026 evening). The SDK's Xenos plugin (D3D12) is in the
 # developer build only, to capture reference frames.
 option(BF_DEV_TOOLS "Build the developer aids" OFF)
+option(BF_LOCAL_BUILD "Keep local modifications instead of installing upstream updates" OFF)
+if(BF_LOCAL_BUILD)
+    target_compile_definitions(bf1943 PRIVATE BF_LOCAL_BUILD=1)
+endif()
 if(BF_DEV_TOOLS)
     rexglue_setup_target(bf1943 GPU_PLUGINS xenos)
 else()
